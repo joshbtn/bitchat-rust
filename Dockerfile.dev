@@ -1,0 +1,22 @@
+# Dockerfile optimized for testing with better dependency caching
+FROM rust:1.88-slim-trixie
+
+# Accept git hash as build argument
+ARG GIT_HASH=unknown
+
+# Install build dependencies for Bluetooth Low Energy support
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libdbus-1-dev \
+    libssl-dev \
+    git \
+    && apt clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create a dummy main.rs to satisfy cargo build for dependency compilation
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+
+# Set environment for testing
+ENV RUST_LOG=debug
+ENV RUST_BACKTRACE=1
+ENV TERM=xterm-256color

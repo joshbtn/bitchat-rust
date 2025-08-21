@@ -436,4 +436,44 @@ impl BluetoothConnectionManager {
     pub async fn get_subscribed_centrals_count(&self) -> usize {
         self.subscribed_centrals.read().await.len()
     }
+    
+    /// Return a list of currently discovered addresses that look like peers.
+    /// This is used by higher-level code to iterate and perform actions such as
+    /// sending data or disconnecting. We return Addresses discovered by the
+    /// adapter that advertise our service or contain service data for it.
+    pub async fn get_connected_addresses(&self) -> Vec<Address> {
+        match self.get_discovered_devices().await {
+            Ok(addrs) => addrs,
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Disconnect a peer by address. In this connectionless implementation
+    /// there may not be a connected link to tear down; attempt to call the
+    /// device disconnect if available and remove any tracked subscribed central
+    /// entries.
+    pub async fn disconnect_from_device(&self, address: &Address) -> Result<()> {
+        info!("disconnect_from_device requested for {}", address);
+
+        // Try to get a device object and call disconnect if supported by BlueZ
+        if let Ok(device) = self.adapter.device(*address) {
+            // Attempt to call disconnect; if the API isn't present or fails,
+            // log and continue.
+            if let Err(e) = device.disconnect().await {
+                warn!("Failed to disconnect device {}: {}", address, e);
+            } else {
+                info!("Called disconnect() on device {}", address);
+            }
+        } else {
+            debug!("No device object available for {} when disconnecting", address);
+        }
+
+        // Remove from subscribed centrals if present
+        {
+            let mut centrals = self.subscribed_centrals.write().await;
+            centrals.retain(|a| a != address);
+        }
+
+        Ok(())
+    }
 }

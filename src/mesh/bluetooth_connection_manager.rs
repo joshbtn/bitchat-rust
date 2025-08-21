@@ -1,15 +1,13 @@
 use crate::{Error, Result};
 use bluer::{
-    Adapter, Address, Device, Session,
+    Adapter, Address, Session,
     adv::{Advertisement, AdvertisementHandle},
     gatt::{
         local::{Application, ApplicationHandle, Characteristic, CharacteristicNotify, CharacteristicNotifyMethod, 
                 CharacteristicWrite, CharacteristicWriteMethod, Service},
-        remote::Characteristic as RemoteCharacteristic,
     },
 };
 use futures::{pin_mut, StreamExt};
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
@@ -25,8 +23,6 @@ pub type DataHandler = Arc<dyn Fn(Vec<u8>, String) + Send + Sync>;
 pub struct BluetoothConnectionManager {
     session: Arc<Session>,
     adapter: Arc<Adapter>,
-    connections: Arc<RwLock<HashMap<Address, Device>>>,
-    characteristics: Arc<RwLock<HashMap<Address, RemoteCharacteristic>>>,
     is_scanning: Arc<Mutex<bool>>,
     adv_handle: Arc<Mutex<Option<AdvertisementHandle>>>,
     app_handle: Arc<Mutex<Option<ApplicationHandle>>>,
@@ -56,8 +52,6 @@ impl BluetoothConnectionManager {
         Ok(Self {
             session: Arc::new(session),
             adapter: Arc::new(adapter),
-            connections: Arc::new(RwLock::new(HashMap::new())),
-            characteristics: Arc::new(RwLock::new(HashMap::new())),
             is_scanning: Arc::new(Mutex::new(false)),
             adv_handle: Arc::new(Mutex::new(None)),
             app_handle: Arc::new(Mutex::new(None)),
@@ -232,151 +226,54 @@ impl BluetoothConnectionManager {
         Ok(())
     }
     
-    pub async fn connect_to_device(&self, address: Address) -> Result<String> {
-        info!("Connecting to device: {}", address);
-        debug!("Connection attempt started for {}", address);
+    pub async fn send_data_via_advertisement(&self, data: &[u8]) -> Result<()> {
+        info!("Sending data via BLE advertisement: {} bytes", data.len());
         
-        let device = self.adapter.device(address)
-            .map_err(|e| Error::Bluetooth(format!("Failed to get device: {}", e)))?;
+        // Stop current advertising
+        self.stop_advertising().await?;
+        
+        // Create advertisement with data in the service data field
+        let mut service_data = std::collections::HashMap::new();
+        service_data.insert(SERVICE_UUID, data.to_vec());
+        
+        let advertisement = Advertisement {
+            service_uuids: vec![SERVICE_UUID].into_iter().collect(),
+            service_data: service_data.into_iter().collect(),
+            discoverable: Some(true),
+            local_name: Some("BitChat".to_string()),
+            ..Default::default()
+        };
+        
+        let handle = self.adapter.advertise(advertisement).await
+            .map_err(|e| Error::Bluetooth(format!("Failed to start data advertising: {}", e)))?;
             
-        let is_connected = device.is_connected().await
-            .map_err(|e| Error::Bluetooth(format!("Failed to check connection: {}", e)))?;
-        debug!("Device {} is_connected: {}", address, is_connected);
+        *self.adv_handle.lock().await = Some(handle);
         
-        if !is_connected {
-            info!("Attempting to connect to {}", address);
-            device.connect().await
-                .map_err(|e| Error::Bluetooth(format!("Failed to connect: {}", e)))?;
-            info!("Successfully connected to {}", address);
-        } else {
-            info!("Device {} already connected", address);
-        }
+        // Keep advertising for a short time to ensure delivery
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         
-        // Discover services
-        info!("Discovering services for device {}", address);
-        let services = device.services().await
-            .map_err(|e| Error::Bluetooth(format!("Failed to get services: {}", e)))?;
-        info!("Found {} services on device {}", services.len(), address);
-            
-        // Find our service and characteristic
-        let mut found_characteristic = None;
-        for service in services {
-            let service_uuid = service.uuid().await
-                .map_err(|e| Error::Bluetooth(format!("Failed to get service UUID: {}", e)))?;
-            debug!("Service UUID: {}", service_uuid);
-            
-            if service_uuid == SERVICE_UUID {
-                info!("Found BitChat service on device {}", address);
-                
-                let chars = service.characteristics().await
-                    .map_err(|e| Error::Bluetooth(format!("Failed to get characteristics: {}", e)))?;
-                info!("Found {} characteristics in BitChat service", chars.len());
-                    
-                for char in chars {
-                    let char_uuid = char.uuid().await
-                        .map_err(|e| Error::Bluetooth(format!("Failed to get char UUID: {}", e)))?;
-                    debug!("Characteristic UUID: {}", char_uuid);
-                    
-                    if char_uuid == CHARACTERISTIC_UUID {
-                        info!("Found BitChat characteristic on device {}", address);
-                        
-                        // Check characteristic properties
-                        let flags = char.flags().await
-                            .map_err(|e| Error::Bluetooth(format!("Failed to get char flags: {}", e)))?;
-                        info!("Characteristic flags: {:?}", flags);
-                        
-                        found_characteristic = Some(char);
-                        break;
-                    }
-                }
-            }
-        }
-        
-        let characteristic = found_characteristic
-            .ok_or_else(|| Error::Bluetooth("Characteristic not found".to_string()))?;
-            
-        // Notifications are automatically started when we call notify()
-            
-        // Start notification handler
-        let notify_stream = characteristic.notify()
-            .await
-            .map_err(|e| Error::Bluetooth(format!("Failed to get notify stream: {}", e)))?;
-            
-        let data_handler = self.data_handler.clone();
-        let addr_str = address.to_string();
-        let addr_str_clone = addr_str.clone();
-        
-        tokio::spawn(async move {
-            pin_mut!(notify_stream);
-            loop {
-                match notify_stream.next().await {
-                    Some(data) => {
-                        debug!("Notification from {}: {} bytes", addr_str_clone, data.len());
-                        if let Some(handler) = data_handler.lock().await.as_ref() {
-                            handler(data, addr_str_clone.clone());
-                        }
-                    }
-                    None => {
-                        info!("Notification stream ended for {}", addr_str_clone);
-                        break;
-                    }
-                }
-            }
-        });
-        
-        // Store connection and characteristic
-        self.connections.write().await.insert(address, device);
-        self.characteristics.write().await.insert(address, characteristic);
-        
-        info!("Successfully established connection to {} and stored in connection map", address);
-        debug!("Connection count after adding {}: {}", address, self.connections.read().await.len());
-        
-        // Return success - the caller should send an announce to the newly connected peer
-        Ok(addr_str)
+        Ok(())
     }
     
-    pub async fn disconnect_from_device(&self, address: &Address) -> Result<()> {
-        info!("Disconnecting from device: {}", address);
+    pub async fn process_discovered_device(&self, address: Address) -> Result<()> {
+        info!("Processing discovered BitChat device: {}", address);
         
-        // Remove characteristic
-        if let Some(_char) = self.characteristics.write().await.remove(address) {
-            // Notifications stop when the characteristic is dropped
-        }
-        
-        // Remove and disconnect device
-        if let Some(device) = self.connections.write().await.remove(address) {
-            device.disconnect().await
-                .map_err(|e| Error::Bluetooth(format!("Failed to disconnect: {}", e)))?;
+        // For connectionless approach, we just notify that a peer was discovered
+        // The actual communication happens via advertisements and GATT server
+        if let Some(handler) = self.data_handler.lock().await.as_ref() {
+            // Send special peer discovery event
+            handler(vec![0xFE, 0xFE], format!("DISCOVERED:{}", address));
         }
         
         Ok(())
     }
     
-    pub async fn send_data(&self, address: &Address, data: &[u8]) -> Result<()> {
-        // First check if we have a connection to this device
-        let connections = self.connections.read().await;
-        let device = connections.get(address)
-            .ok_or_else(|| Error::Connection(format!("No connection to device {}", address)))?;
-            
-        // Check if device is still connected
-        let is_connected = device.is_connected().await
-            .map_err(|e| Error::Bluetooth(format!("Failed to check connection status: {}", e)))?;
-            
-        if !is_connected {
-            return Err(Error::Connection(format!("Device {} is not connected", address)));
-        }
+    pub async fn send_data(&self, _address: &Address, data: &[u8]) -> Result<()> {
+        // In connectionless mode, we send data via GATT server notifications to all subscribed centrals
+        // or via advertisements for broadcast messages
+        debug!("Sending {} bytes via GATT server notifications", data.len());
         
-        // Get the characteristic
-        let characteristics = self.characteristics.read().await;
-        let characteristic = characteristics.get(address)
-            .ok_or_else(|| Error::Connection(format!("No characteristic for device {}", address)))?;
-            
-        debug!("Sending {} bytes to {}", data.len(), address);
-        
-        characteristic.write(data).await
-            .map_err(|e| Error::Bluetooth(format!("Failed to write data to {}: {}", address, e)))?;
-            
-        Ok(())
+        self.send_notification(data).await
     }
     
     pub async fn get_discovered_devices(&self) -> Result<Vec<Address>> {
@@ -403,6 +300,14 @@ impl BluetoothConnectionManager {
                     } else {
                         debug!("Device {} has no advertised UUIDs", addr);
                     }
+                } else {
+                    // Also check service data for our service UUID
+                    if let Ok(Some(service_data)) = device.service_data().await {
+                        if service_data.contains_key(&SERVICE_UUID) {
+                            info!("Device {} ({}) has BitChat service data", addr, name);
+                            filtered.push(addr);
+                        }
+                    }
                 }
             }
         }
@@ -410,12 +315,16 @@ impl BluetoothConnectionManager {
         Ok(filtered)
     }
     
-    pub async fn get_connected_addresses(&self) -> Vec<Address> {
-        self.connections.read().await.keys().cloned().collect()
+    pub async fn get_active_peer_count(&self) -> usize {
+        // In connectionless mode, return the number of subscribed centrals
+        self.subscribed_centrals.read().await.len()
     }
     
-    pub async fn is_connected(&self, address: &Address) -> bool {
-        self.connections.read().await.contains_key(address)
+    pub async fn is_peer_active(&self, _address: &Address) -> bool {
+        // In connectionless mode, we consider peers active if they're recently discovered
+        // This is a simplified implementation - in practice you might want to track
+        // recent advertisement timestamps
+        true
     }
     
     pub async fn start_device_discovery_monitor(&self) -> Result<()> {
@@ -434,30 +343,34 @@ impl BluetoothConnectionManager {
                 debug!("Device event received: {:?}", device_event);
                 match device_event {
                     bluer::AdapterEvent::DeviceAdded(addr) => {
-//                        info!("Device discovered: {}", addr);
+                        info!("Device discovered: {}", addr);
                         
                         // Check if it advertises our service
                         if let Ok(device) = adapter.device(addr) {
                             debug!("Got device object for {}", addr);
+                            
+                            // Check for service data first (for data messages)
+                            if let Ok(Some(service_data)) = device.service_data().await {
+                                if let Some(data) = service_data.get(&SERVICE_UUID) {
+                                    info!("Received data via advertisement from {}: {} bytes", addr, data.len());
+                                    
+                                    // Process the received data
+                                    if let Some(handler) = connection_manager.data_handler.lock().await.as_ref() {
+                                        handler(data.clone(), addr.to_string());
+                                    }
+                                }
+                            }
+                            
+                            // Also check for service UUID announcements
                             match device.uuids().await {
                                 Ok(Some(uuids)) => {
                                     debug!("Device {} UUIDs: {:?}", addr, uuids);
                                     if uuids.contains(&SERVICE_UUID) {
-                                        info!("Found BitChat device: {} - initiating connection", addr);
+                                        info!("Found BitChat device: {} - processing discovery", addr);
                                         
-                                        // Auto-connect
-                                        match connection_manager.connect_to_device(addr).await {
-                                            Ok(connected_addr) => {
-                                                info!("Successfully connected to BitChat device: {}", connected_addr);
-                                                // Notify about new connection
-                                                if let Some(handler) = connection_manager.data_handler.lock().await.as_ref() {
-                                                    // Send special connection event
-                                                    handler(vec![0xFF, 0xFF], format!("CONNECTED:{}", connected_addr));
-                                                }
-                                            }
-                                            Err(e) => {
-                                                warn!("Failed to connect to BitChat device {}: {}", addr, e);
-                                            }
+                                        // Process discovery instead of connecting
+                                        if let Err(e) = connection_manager.process_discovered_device(addr).await {
+                                            warn!("Failed to process discovered device {}: {}", addr, e);
                                         }
                                     } else {
                                         debug!("Device {} does not advertise BitChat service", addr);
@@ -476,7 +389,10 @@ impl BluetoothConnectionManager {
                     }
                     bluer::AdapterEvent::DeviceRemoved(addr) => {
                         info!("Device removed: {}", addr);
-                        let _ = connection_manager.disconnect_from_device(&addr).await;
+                        // In connectionless mode, just notify about device removal
+                        if let Some(handler) = connection_manager.data_handler.lock().await.as_ref() {
+                            handler(vec![0xFD, 0xFD], format!("REMOVED:{}", addr));
+                        }
                     }
                     _ => {
                         debug!("Other device event: {:?}", device_event);

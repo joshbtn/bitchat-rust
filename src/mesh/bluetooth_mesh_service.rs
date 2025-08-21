@@ -67,9 +67,23 @@ impl BluetoothMeshService {
                     let from_address_clone = from_address.clone();
                     
                     
-                    // Check for special connection event
+                    // Check for special connection events
                     if data.len() == 2 && data[0] == 0xFF && data[1] == 0xFF && from_address.starts_with("CONNECTED:") {
-                        debug!("Connection event received");
+                        debug!("Legacy connection event received - ignoring in connectionless mode");
+                        return;
+                    }
+                    
+                    // Check for peer discovery events
+                    if data.len() == 2 && data[0] == 0xFE && data[1] == 0xFE && from_address.starts_with("DISCOVERED:") {
+                        let peer_addr = from_address.replace("DISCOVERED:", "");
+                        debug!("Peer discovered via advertisement: {}", peer_addr);
+                        return;
+                    }
+                    
+                    // Check for peer removal events
+                    if data.len() == 2 && data[0] == 0xFD && data[1] == 0xFD && from_address.starts_with("REMOVED:") {
+                        let peer_addr = from_address.replace("REMOVED:", "");
+                        debug!("Peer removed: {}", peer_addr);
                         return;
                     }
                     
@@ -316,22 +330,15 @@ impl BluetoothMeshService {
     async fn broadcast_packet(&self, packet: Packet) -> Result<()> {
         let data = BinaryProtocol::encode(&packet)?;
         
-        // Send to all connected peers (outgoing connections where we are central)
-        let addresses = self.connection_manager.get_connected_addresses().await;
+        // In connectionless mode, we broadcast via:
+        // 1. GATT server notifications to subscribed centrals
+        // 2. Advertisement data for discovery and small messages
         
-        // Check if we have subscribed centrals (incoming connections where we are peripheral)
         let has_centrals = self.connection_manager.has_subscribed_centrals().await;
         let centrals_count = self.connection_manager.get_subscribed_centrals_count().await;
         
-        debug!("Broadcasting {:?} to {} peripherals, {} centrals", 
-              packet.message_type, addresses.len(), centrals_count);
-        
-        
-        if addresses.is_empty() && !has_centrals {
-            debug!("No connected peers for {:?} message", packet.message_type);
-            
-            return Ok(());
-        }
+        debug!("Broadcasting {:?} to {} centrals via notifications", 
+              packet.message_type, centrals_count);
         
         // Check if needs fragmentation (matching Android's threshold)
         if data.len() > 512 {
@@ -374,49 +381,36 @@ impl BluetoothMeshService {
                 // Encode and send fragment packet
                 let fragment_data = BinaryProtocol::encode(&fragment_packet)?;
                 
-                for address in &addresses {
-                    match self.connection_manager.send_data(address, &fragment_data).await {
-                        Ok(_) => debug!("Sent fragment {}/{} to {}", index + 1, total_fragments, address),
-                        Err(e) => {
-                            error!("Failed to send fragment to {}: {}", address, e);
-                            // Remove disconnected peer from our connection list
-                            if let Err(cleanup_err) = self.connection_manager.disconnect_from_device(address).await {
-                                warn!("Failed to cleanup disconnected device {}: {}", address, cleanup_err);
-                            }
-                        }
-                    }
-                }
-                
-                // Also send fragments to subscribed centrals
+                // Send fragments to subscribed centrals via GATT notifications
                 if has_centrals {
                     match self.connection_manager.send_notification(&fragment_data).await {
                         Ok(_) => debug!("Sent fragment {}/{} notification to centrals", index + 1, total_fragments),
                         Err(e) => error!("Failed to send fragment notification: {}", e),
                     }
                 }
+                
+                // For fragments, we can also try advertisement data for smaller ones
+                if fragment_data.len() <= 27 { // BLE advertisement limit
+                    if let Err(e) = self.connection_manager.send_data_via_advertisement(&fragment_data).await {
+                        debug!("Failed to send fragment via advertisement: {}", e);
+                    }
+                }
             }
         } else {
             // Send without fragmentation for small messages
             
-            // Send to connected peripherals (where we are central)
-            for address in addresses {
-                match self.connection_manager.send_data(&address, &data).await {
-                    Ok(_) => debug!("Sent message to peripheral {}", address),
-                    Err(e) => {
-                        error!("Failed to send data to peripheral {}: {}", address, e);
-                        // Remove disconnected peer from our connection list
-                        if let Err(cleanup_err) = self.connection_manager.disconnect_from_device(&address).await {
-                            warn!("Failed to cleanup disconnected device {}: {}", address, cleanup_err);
-                        }
-                    }
-                }
-            }
-            
-            // Also send to subscribed centrals via notifications (where we are peripheral)
+            // Send to subscribed centrals via notifications
             if has_centrals {
                 match self.connection_manager.send_notification(&data).await {
                     Ok(_) => debug!("Sent notification to subscribed centrals"),
                     Err(e) => error!("Failed to send notification to centrals: {}", e),
+                }
+            }
+            
+            // For small messages, also try advertisement data
+            if data.len() <= 27 { // BLE advertisement data limit
+                if let Err(e) = self.connection_manager.send_data_via_advertisement(&data).await {
+                    debug!("Failed to send via advertisement: {}", e);
                 }
             }
         }

@@ -1851,17 +1851,17 @@ async fn run_app(
                         tokio::spawn(async move {
                             match peer_address.parse() {
                                 Ok(addr) => {
-                                    info!("Parsed address {} successfully, connecting...", peer_address);
-                                    match mesh_service.get_connection_manager().connect_to_device(addr).await {
-                                        Ok(connected_peer) => {
-                                            info!("ConnectToPeer event successfully connected to: {}", connected_peer);
-                                            // Send announce to newly connected peer
+                                    info!("Parsed address {} successfully, processing discovered device...", peer_address);
+                                    match mesh_service.get_connection_manager().process_discovered_device(addr).await {
+                                        Ok(()) => {
+                                            info!("ConnectToPeer event successfully processed device: {}", peer_address);
+                                            // Send announce to newly discovered peer
                                             if let Err(e) = mesh_service.send_announce().await {
-                                                error!("Failed to send announce after connection: {}", e);
+                                                error!("Failed to send announce after discovery: {}", e);
                                             }
                                         }
                                         Err(e) => {
-                                            error!("ConnectToPeer event failed to connect to peer {}: {}", peer_address, e);
+                                            error!("ConnectToPeer event failed to process peer {}: {}", peer_address, e);
                                         }
                                     }
                                 }

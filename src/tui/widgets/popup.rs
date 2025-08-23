@@ -44,7 +44,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
         );
     } else {
         match &app.phase {
-            TuiPhase::Connecting => {
+            TuiPhase::Starting => {
                 let items: Vec<ListItem> = app.popup_messages
                     .iter()
                     .map(|msg| ListItem::new(Line::from(msg.as_str())))
@@ -53,7 +53,7 @@ pub fn render(f: &mut Frame, app: &App, area: Rect) {
                 let list = List::new(items)
                     .block(Block::default()
                         .borders(Borders::ALL)
-                        .title("Connecting...")
+                        .title("Starting Mesh...")
                         .style(Style::default().fg(Color::Yellow)));
                 
                 f.render_widget(list, popup_area);

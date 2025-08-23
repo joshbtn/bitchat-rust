@@ -53,8 +53,8 @@ pub fn render(app: &mut App, f: &mut Frame) {
                 // Only show popup for errors
                 widgets::popup::render(f, app, f.size());
             }
-            TuiPhase::Connecting | TuiPhase::Connected => {
-                // Don't show popup for connecting or connected - keep UI responsive
+            TuiPhase::Starting | TuiPhase::MeshActive => {
+                // Don't show popup for starting or mesh active - keep UI responsive
             }
         }
     }

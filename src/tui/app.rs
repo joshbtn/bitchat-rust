@@ -47,8 +47,8 @@ impl SidebarMenuState {
 }
 
 pub enum TuiPhase {
-    Connecting,
-    Connected,
+    Starting,
+    MeshActive,
     Error(String),
 }
 
@@ -72,7 +72,7 @@ pub struct App {
     // Data state for rendering
     pub nickname: String,
     pub network_name: String,
-    pub connected: bool,
+    pub peer_count: usize,
     pub channels: Vec<String>,
     pub people: Vec<String>,
     pub blocked: Vec<String>,
@@ -117,7 +117,7 @@ impl App {
         
         let mut app = Self {
             input: Input::default(),
-            phase: TuiPhase::Connected,
+            phase: TuiPhase::Starting,
             should_quit: false,
             focus_area: FocusArea::InputBox,
             sidebar_flat_selected: 0,
@@ -125,7 +125,7 @@ impl App {
             message_viewport_height: 10,
             nickname,
             network_name: "BitChat Mesh".to_string(),
-            connected: false,
+            peer_count: 0,
             channels,
             people: Vec::new(),
             blocked: Vec::new(),
@@ -274,9 +274,8 @@ impl App {
         self.msg_scroll = 0;
     }
     
-    pub fn transition_to_connected(&mut self) {
-        self.phase = TuiPhase::Connected;
-        self.connected = true;
+    pub fn transition_to_mesh_active(&mut self) {
+        self.phase = TuiPhase::MeshActive;
         let mut final_messages = self.popup_messages.drain(..)
             .map(|content| Message { 
                 id: uuid::Uuid::new_v4().to_string(),
@@ -289,11 +288,12 @@ impl App {
             .collect();
         self.channel_messages.entry("#public".to_string()).or_default().append(&mut final_messages);
     }
-    
-    pub fn transition_to_connecting(&mut self) {
-        self.phase = TuiPhase::Connecting;
-        self.connected = false;
+
+    pub fn transition_to_starting(&mut self) {
+        self.phase = TuiPhase::Starting;
         self.popup_messages.clear();
+    }    pub fn update_peer_count(&mut self, count: usize) {
+        self.peer_count = count;
     }
 
     pub fn transition_to_error(&mut self, error: String) {
@@ -304,11 +304,11 @@ impl App {
         let trimmed = message.trim().to_string();
         if !trimmed.is_empty() { 
             match self.phase {
-                TuiPhase::Connecting => {
-                    // During connecting, add to popup messages
+                TuiPhase::Starting => {
+                    // During starting, add to popup messages
                     self.popup_messages.push(trimmed); 
                 }
-                TuiPhase::Connected | TuiPhase::Error(_) => {
+                TuiPhase::MeshActive | TuiPhase::Error(_) => {
                     // When connected, add as system message to current conversation
                     let system_msg = Message {
                         id: uuid::Uuid::new_v4().to_string(),

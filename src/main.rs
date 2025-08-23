@@ -4,6 +4,7 @@ use bitchat_rust::mesh::{BluetoothMeshService, BluetoothMeshDelegate};
 use bitchat_rust::model::{BitchatMessage, TrustManager};
 use bitchat_rust::protocol::{Packet, MessageType};
 use bitchat_rust::tui::{App, Event, FocusArea, LogEvent, init_tui_logger};
+use bitchat_rust::tui::app::TuiPhase;
 use bitchat_rust::state::AppState;
 use std::sync::Arc;
 use async_trait::async_trait;
@@ -75,6 +76,7 @@ enum AppEvent {
     SendHandshakeRequest(String), // target_peer_id
     NoiseEncrypted(String, Packet), // peer_id, packet
     SystemValidation(String, Packet), // peer_id, packet
+    MeshServiceStarted, // Mesh service has fully initialized
 }
 
 #[async_trait]
@@ -274,7 +276,8 @@ async fn main() -> Result<()> {
     
     // Create app state with loaded nickname
     let mut app = App::new_with_nickname(app_state.nickname.clone());
-    app.transition_to_connecting();
+    // Start in "Starting" phase while the mesh initializes
+    app.transition_to_starting();
     
     // Create event channels
     let (app_sender, mut app_receiver) = mpsc::unbounded_channel();
@@ -402,6 +405,7 @@ async fn main() -> Result<()> {
     // Start mesh service
     let mesh_service_clone = mesh_service.clone();
     let cancel_token_mesh = cancel_token.clone();
+    let app_sender_for_mesh = app_sender.clone();
     tokio::spawn(async move {
         tokio::select! {
             _ = cancel_token_mesh.cancelled() => {
@@ -410,6 +414,19 @@ async fn main() -> Result<()> {
             result = mesh_service_clone.start() => {
                 if let Err(e) = result {
                     error!("Failed to start mesh service: {}", e);
+                } else {
+                    info!("Mesh service started successfully");
+                    
+                    // Give the mesh service a few seconds to initialize fully,
+                    // then transition to mesh active even if no peers are found
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    let _ = app_sender_for_mesh.send(AppEvent::Log(
+                        "Mesh network is active and scanning for peers".to_string(),
+                        log::Level::Info
+                    ));
+                    
+                    // Send a custom event to transition to mesh active
+                    let _ = app_sender_for_mesh.send(AppEvent::MeshServiceStarted);
                 }
             }
         }
@@ -608,23 +625,24 @@ async fn run_app(
                                                 }
                                             } else if input == "/disconnect" {
                                                 // Disconnect from Bluetooth mesh
-                                                app.add_popup_message("Disconnecting from Bluetooth mesh...".to_string());
+                                                app.add_popup_message("Stopping Bluetooth mesh...".to_string());
                                                 let mesh_service = mesh_service.clone();
                                                 tokio::spawn(async move {
                                                     if let Err(e) = mesh_service.stop().await {
-                                                        error!("Failed to disconnect: {}", e);
+                                                        error!("Failed to stop mesh: {}", e);
                                                     }
                                                 });
-                                                app.transition_to_connecting();
+                                                app.transition_to_starting();
                                                 app.people.clear();
+                                                app.update_peer_count(0);
                                             } else if input == "/connect" {
                                                 // Reconnect to Bluetooth mesh
-                                                app.add_popup_message("Reconnecting to Bluetooth mesh...".to_string());
-                                                app.transition_to_connecting();
+                                                app.add_popup_message("Starting Bluetooth mesh...".to_string());
+                                                app.transition_to_starting();
                                                 let mesh_service = mesh_service.clone();
                                                 tokio::spawn(async move {
                                                     if let Err(e) = mesh_service.start().await {
-                                                        error!("Failed to reconnect: {}", e);
+                                                        error!("Failed to start mesh: {}", e);
                                                     }
                                                 });
                                             } else if input.starts_with("/npeers") {
@@ -1724,8 +1742,13 @@ async fn run_app(
                     }
                     AppEvent::PeerConnected(peer_id) => {
                         app.add_popup_message(format!("Connected to peer: {}", peer_id));
-                        if app.connected == false {
-                            app.transition_to_connected();
+                        
+                        // Transition to mesh active if this is the first connection
+                        match app.phase {
+                            TuiPhase::Starting => {
+                                app.transition_to_mesh_active();
+                            }
+                            _ => {}
                         }
                         
                         // Update peer list with nicknames
@@ -1748,7 +1771,16 @@ async fn run_app(
                         });
                     }
                     AppEvent::PeerListUpdated(peers) => {
-                        app.people = peers;
+                        app.people = peers.clone();
+                        app.update_peer_count(peers.len());
+                        
+                        // If the mesh just became active, transition appropriately
+                        match app.phase {
+                            TuiPhase::Starting if !peers.is_empty() => {
+                                app.transition_to_mesh_active();
+                            }
+                            _ => {}
+                        }
                     }
                     AppEvent::NoiseHandshakeComplete(peer_id) => {
                         app.add_popup_message(format!("Secure channel established with: {}", peer_id));
@@ -2098,6 +2130,15 @@ async fn run_app(
                                 }
                             }
                         });
+                    }
+                    AppEvent::MeshServiceStarted => {
+                        // Mesh service has fully started - transition to mesh active
+                        match app.phase {
+                            TuiPhase::Starting => {
+                                app.transition_to_mesh_active();
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }

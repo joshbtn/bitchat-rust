@@ -1,0 +1,3 @@
+[2025-08-23 13:53:52.830] INFO - bitchat_rust: === BitChat TUI Starting ===
+[2025-08-23 13:53:52.831] INFO - bitchat_rust: Log files: logs/info.log and logs/error.log
+[2025-08-23 13:53:52.831] INFO - bitchat_rust: Generated random peer ID for this session: 7fb31407f4fa6321

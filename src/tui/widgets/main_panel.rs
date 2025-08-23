@@ -25,10 +25,20 @@ pub fn render(f: &mut Frame, app: &mut App, area: Rect) {
     let title = if let Some(user) = dm_target {
         format!("DM with {}{}", user, scroll_indicator)
     } else if let Some(channel) = channel_name {
-        if app.connected {
-            format!("{}{}", channel, scroll_indicator)
-        } else {
-            format!("{} (disconnected){}", channel, scroll_indicator)
+        match app.phase {
+            crate::tui::app::TuiPhase::Starting => {
+                format!("{} (starting mesh...){}", channel, scroll_indicator)
+            }
+            crate::tui::app::TuiPhase::MeshActive => {
+                if app.peer_count > 0 {
+                    format!("{} ({} peers){}", channel, app.peer_count, scroll_indicator)
+                } else {
+                    format!("{} (scanning for peers...){}", channel, scroll_indicator)
+                }
+            }
+            crate::tui::app::TuiPhase::Error(_) => {
+                format!("{} (error){}", channel, scroll_indicator)
+            }
         }
     } else {
         "No conversation selected".to_string()

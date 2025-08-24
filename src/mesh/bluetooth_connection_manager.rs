@@ -49,6 +49,16 @@ impl BluetoothConnectionManager {
         adapter.set_powered(true).await
             .map_err(|e| Error::Bluetooth(format!("Failed to power on adapter: {}", e)))?;
             
+        // Configure adapter for connectionless operation - disable pairing
+        if let Err(e) = adapter.set_pairable(false).await {
+            warn!("Failed to disable pairing (may not be supported): {}", e);
+        }
+        
+        // Set discoverable timeout to 0 (always discoverable) 
+        if let Err(e) = adapter.set_discoverable_timeout(0).await {
+            warn!("Failed to set discoverable timeout (may not be supported): {}", e);
+        }
+            
         Ok(Self {
             session: Arc::new(session),
             adapter: Arc::new(adapter),

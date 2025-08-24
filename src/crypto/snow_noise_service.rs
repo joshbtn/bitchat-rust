@@ -5,7 +5,7 @@ use snow::{Builder, HandshakeState, TransportState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use log::{info, warn, debug};
+use log::{info, warn, debug, error};
 use sha2::{Sha256, Digest};
 
 const NOISE_PATTERN: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
@@ -147,9 +147,12 @@ impl SnowNoiseService {
         
         // Check if we already have a session
         let mut sessions = self.sessions.write().await;
-        if sessions.contains_key(&target_peer_id) {
-            if sessions[&target_peer_id].transport_state.is_some() {
+        if let Some(existing_session) = sessions.get(&target_peer_id) {
+            if existing_session.transport_state.is_some() {
                 return Err(Error::Noise("Already have completed session with peer".to_string()));
+            } else if existing_session.handshake_state.is_some() {
+                warn!("Already have ongoing handshake with {} - replacing", target_peer_id);
+                sessions.remove(&target_peer_id);
             }
         }
         
@@ -199,10 +202,15 @@ impl SnowNoiseService {
         
         let mut sessions = self.sessions.write().await;
         
-        // Check if we already have a session
-        if sessions.contains_key(&peer_id) {
-            warn!("Already have session with {} - replacing", peer_id);
-            sessions.remove(&peer_id);
+        // Check if we already have a session - if so, check its state
+        if let Some(existing_session) = sessions.get(&peer_id) {
+            if existing_session.transport_state.is_some() {
+                warn!("Already have completed session with {} - rejecting new handshake", peer_id);
+                return Err(Error::Noise("Already have completed session with peer".to_string()));
+            } else if existing_session.handshake_state.is_some() {
+                warn!("Already have ongoing handshake with {} - replacing", peer_id);
+                sessions.remove(&peer_id);
+            }
         }
         
         // Get peer's static key if we have it
@@ -217,6 +225,8 @@ impl SnowNoiseService {
         if let Some(key) = peer_static_key {
             debug!("Using known static key for peer {}", peer_id);
             builder = builder.remote_public_key(key);
+        } else {
+            debug!("No known static key for peer {} - will learn during handshake", peer_id);
         }
         
         let mut handshake = builder
@@ -226,7 +236,10 @@ impl SnowNoiseService {
         // Process first message (e)
         let mut payload_buffer = vec![0u8; 65535];
         let payload_len = handshake.read_message(&packet.payload, &mut payload_buffer)
-            .map_err(|e| Error::Encryption(format!("Failed to read first message: {}", e)))?;
+            .map_err(|e| {
+                error!("Failed to read first message from {}: {}", peer_id, e);
+                Error::Encryption(format!("Failed to read first message: {}", e))
+            })?;
         
         if payload_len > 0 {
             debug!("First message contained {} bytes of payload", payload_len);
@@ -266,14 +279,20 @@ impl SnowNoiseService {
         let session = sessions.get_mut(&peer_id)
             .ok_or_else(|| Error::Noise(format!("No session found for {}", peer_id)))?;
         
+        debug!("Session role for {}: initiator={}", peer_id, session.is_initiator);
+        
         if !session.is_initiator {
             // We're the responder, process the third message (s, se)
+            debug!("Processing as responder - expecting third message (s, se)");
             let mut handshake = session.handshake_state.take()
                 .ok_or_else(|| Error::Noise("No handshake state".to_string()))?;
             
             let mut payload_buffer = vec![0u8; 65535];
             let payload_len = handshake.read_message(&packet.payload, &mut payload_buffer)
-                .map_err(|e| Error::Encryption(format!("Failed to read third message: {}", e)))?;
+                .map_err(|e| {
+                    error!("Responder failed to read third message from {}: {}", peer_id, e);
+                    Error::Encryption(format!("Failed to read third message: {}", e))
+                })?;
             
             if payload_len > 0 {
                 debug!("Third message contained {} bytes of payload", payload_len);
@@ -307,12 +326,16 @@ impl SnowNoiseService {
             Ok(None)
         } else {
             // We're the initiator, process the second message (e, ee, s, es)
+            debug!("Processing as initiator - expecting second message (e, ee, s, es)");
             let mut handshake = session.handshake_state.take()
                 .ok_or_else(|| Error::Noise("No handshake state".to_string()))?;
             
             let mut payload_buffer = vec![0u8; 65535];
             let payload_len = handshake.read_message(&packet.payload, &mut payload_buffer)
-                .map_err(|e| Error::Encryption(format!("Failed to read second message: {}", e)))?;
+                .map_err(|e| {
+                    error!("Initiator failed to read second message from {}: {}", peer_id, e);
+                    Error::Encryption(format!("Failed to read second message: {}", e))
+                })?;
             
             if payload_len > 0 {
                 debug!("Second message contained {} bytes of payload", payload_len);
@@ -550,6 +573,32 @@ impl SnowNoiseService {
         } else {
             Ok(false)
         }
+    }
+    
+    pub async fn is_handshake_complete(&self, peer_id: &str) -> bool {
+        let sessions = self.sessions.read().await;
+        sessions.get(peer_id)
+            .map(|session| session.transport_state.is_some())
+            .unwrap_or(false)
+    }
+    
+    pub async fn clear_failed_session(&self, peer_id: &str) {
+        let mut sessions = self.sessions.write().await;
+        if let Some(session) = sessions.get(peer_id) {
+            if session.transport_state.is_none() {
+                info!("Clearing failed handshake session for {}", peer_id);
+                sessions.remove(peer_id);
+            }
+        }
+    }
+    
+    pub async fn get_session_info(&self, peer_id: &str) -> Option<(bool, bool, bool)> {
+        let sessions = self.sessions.read().await;
+        sessions.get(peer_id).map(|session| (
+            session.is_initiator,
+            session.handshake_state.is_some(),
+            session.transport_state.is_some(),
+        ))
     }
     
     pub async fn store_peer_key(&self, peer_id: String, public_key: Vec<u8>) -> Result<()> {

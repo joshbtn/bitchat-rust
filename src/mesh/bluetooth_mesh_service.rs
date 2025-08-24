@@ -51,6 +51,11 @@ impl BluetoothMeshService {
     pub async fn start(&self) -> Result<()> {
         info!("Starting Bluetooth mesh service with peer ID: {}", self.get_peer_id_hex());
         
+        // Configure Bluetooth adapter to prevent pairing
+        if let Err(e) = self.connection_manager.reject_pairing_requests().await {
+            warn!("Could not configure pairing rejection: {}", e);
+        }
+        
         // Set up data handler
         let fragment_manager = self.fragment_manager.clone();
         let packet_processor = self.packet_processor.clone();
@@ -549,7 +554,16 @@ impl BluetoothMeshService {
         }
         
         // Handle the handshake initiation
-        let response_packet = noise_service.handle_handshake_init(self.peer_id, peer_id.clone(), packet.clone()).await?;
+        let response_packet = match noise_service.handle_handshake_init(self.peer_id, peer_id.clone(), packet.clone()).await {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Failed to handle handshake init from {}: {}", peer_id, e);
+                // Clear any failed session state
+                noise_service.clear_failed_session(&peer_id).await;
+                self.delegate.did_fail_noise_handshake(peer_id, format!("{}", e)).await;
+                return Err(e);
+            }
+        };
         
         info!("Sending NoiseHandshakeResp to {} (payload: {} bytes)", peer_id, response_packet.payload.len());
         self.broadcast_packet(response_packet).await?;
@@ -563,9 +577,27 @@ impl BluetoothMeshService {
     pub async fn handle_noise_handshake_response(&self, peer_id: String, packet: Packet) -> Result<()> {
         info!("Handling NoiseHandshakeResp from {}", peer_id);
         
-        // Process the response
+        // Check session info before processing
         let noise_service = self.encryption_service.get_noise_service();
-        let third_message = noise_service.handle_handshake_response(self.peer_id, peer_id.clone(), packet.clone()).await?;
+        if let Some((is_initiator, has_handshake, has_transport)) = noise_service.get_session_info(&peer_id).await {
+            debug!("Session state for {}: initiator={}, handshake={}, transport={}", 
+                peer_id, is_initiator, has_handshake, has_transport);
+        } else {
+            warn!("No session found for {} when handling handshake response", peer_id);
+            return Err(Error::Noise(format!("No session found for {}", peer_id)));
+        }
+        
+        // Process the response
+        let third_message = match noise_service.handle_handshake_response(self.peer_id, peer_id.clone(), packet.clone()).await {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!("Failed to handle handshake response from {}: {}", peer_id, e);
+                // Clear the failed session
+                noise_service.clear_failed_session(&peer_id).await;
+                self.delegate.did_fail_noise_handshake(peer_id, format!("{}", e)).await;
+                return Err(e);
+            }
+        };
         
         // If we need to send a third message (for XX pattern completion)
         if let Some(third_packet) = third_message {

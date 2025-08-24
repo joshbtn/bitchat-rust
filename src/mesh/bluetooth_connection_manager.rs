@@ -49,14 +49,50 @@ impl BluetoothConnectionManager {
         adapter.set_powered(true).await
             .map_err(|e| Error::Bluetooth(format!("Failed to power on adapter: {}", e)))?;
             
-        // Configure adapter for connectionless operation - disable pairing
+        // Configure adapter for connectionless operation
+        // Try multiple approaches to disable pairing/bonding
+        
+        // 1. Disable pairing (may not be supported on all systems)
         if let Err(e) = adapter.set_pairable(false).await {
             warn!("Failed to disable pairing (may not be supported): {}", e);
+        } else {
+            info!("Successfully disabled pairing on adapter");
         }
         
-        // Set discoverable timeout to 0 (always discoverable) 
+        // 2. Set pairable timeout to 0 to make it non-pairable
+        if let Err(e) = adapter.set_pairable_timeout(0).await {
+            warn!("Failed to set pairable timeout (may not be supported): {}", e);
+        } else {
+            info!("Successfully set pairable timeout to 0");
+        }
+        
+        // 3. Set discoverable timeout to 0 (always discoverable) 
         if let Err(e) = adapter.set_discoverable_timeout(0).await {
             warn!("Failed to set discoverable timeout (may not be supported): {}", e);
+        } else {
+            info!("Successfully set discoverable timeout to 0");
+        }
+        
+        // 4. Make sure discoverable is enabled for advertising
+        if let Err(e) = adapter.set_discoverable(true).await {
+            warn!("Failed to set discoverable (may not be supported): {}", e);
+        } else {
+            info!("Successfully enabled discoverable mode");
+        }
+        
+        // 5. Try to disable legacy pairing and authentication
+        // Note: These may not be supported on all systems but are worth trying
+        info!("Configuring adapter for connectionless operation");
+        
+        // Log current adapter configuration for debugging
+        if let Ok(powered) = adapter.is_powered().await {
+            info!("Adapter powered: {}", powered);
+        }
+        if let Ok(pairable) = adapter.is_pairable().await {
+            info!("Adapter pairable: {}", pairable);
+        }
+        if let Ok(discoverable) = adapter.is_discoverable().await {
+            info!("Adapter discoverable: {}", discoverable);
         }
             
         Ok(Self {
@@ -169,6 +205,8 @@ impl BluetoothConnectionManager {
                     uuid: CHARACTERISTIC_UUID,
                     write: Some(write_handle),
                     notify: Some(notify_handle),
+                    // Note: BlueR may not expose all GATT security configuration options
+                    // We rely on the adapter-level pairing configuration instead
                     ..Default::default()
                 },
             ],
@@ -416,8 +454,21 @@ impl BluetoothConnectionManager {
         Ok(())
     }
     
-    pub fn get_adapter(&self) -> Arc<Adapter> {
+    pub async fn get_adapter(&self) -> Arc<Adapter> {
         self.adapter.clone()
+    }
+    
+    /// Try to reject pairing requests to avoid unwanted pairing dialogs
+    pub async fn reject_pairing_requests(&self) -> Result<()> {
+        // This method could be used to monitor for and reject pairing requests
+        // The implementation would depend on BlueZ D-Bus API access for pairing events
+        info!("Setting up pairing request rejection (if supported)");
+        
+        // Note: Actual pairing rejection would require monitoring D-Bus events
+        // which might need additional dependencies. For now, we log that we're
+        // trying to prevent pairing through adapter configuration.
+        
+        Ok(())
     }
     
     pub async fn send_notification(&self, data: &[u8]) -> Result<()> {

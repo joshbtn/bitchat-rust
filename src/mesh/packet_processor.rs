@@ -448,10 +448,10 @@ impl PacketProcessor {
             
             // Send the system message
             self.delegate.did_receive_message(join_message).await;
+            
+            // Only send peer connection notification for first-time connections
+            self.delegate.did_connect_to_peer(sender_id_hex.clone()).await;
         }
-        
-        // Always send peer connection notification (for UI updates)
-        self.delegate.did_connect_to_peer(sender_id_hex.clone()).await;
         
         // Ensure peer exists in peer manager first
         let _ = self.peer_manager.add_peer(sender_id_hex.clone()).await;

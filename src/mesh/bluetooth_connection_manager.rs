@@ -12,6 +12,13 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 use log::{debug, info, warn};
+use std::time::Duration as StdDuration;
+
+// DBus agent imports (used only when running on Linux with system bus)
+#[cfg(target_os = "linux")]
+use dbus_crossroads::{Crossroads, MethodErr};
+#[cfg(target_os = "linux")]
+use dbus::blocking::Connection as DbusConnection;
 
 // Service and characteristic UUIDs (matching iOS/Android)
 pub const SERVICE_UUID: Uuid = Uuid::from_u128(0xF47B5E2D_4A9E_4C5A_9B3F_8E1D2C3A4B5C);
@@ -469,10 +476,78 @@ impl BluetoothConnectionManager {
         // The implementation would depend on BlueZ D-Bus API access for pairing events
         info!("Setting up pairing request rejection (if supported)");
         
-        // Note: Actual pairing rejection would require monitoring D-Bus events
-        // which might need additional dependencies. For now, we log that we're
-        // trying to prevent pairing through adapter configuration.
-        
+        // On Linux, try to register a DBus Agent with BlueZ that rejects
+        // any pairing/bonding requests. This prevents desktop environments
+        // from showing pairing dialogs when peers connect for GATT access.
+        #[cfg(target_os = "linux")]
+        {
+            // Spawn a blocking thread to register a DBus agent and serve requests
+            let _ = std::thread::spawn(move || {
+                // Use a short timeout when calling BlueZ
+                let timeout = StdDuration::from_secs(5);
+
+                match DbusConnection::new_system() {
+                    Ok(conn) => {
+                        let mut cr = Crossroads::new();
+
+                        // Register org.bluez.Agent1 interface with methods that reject
+                        let iface_token = cr.register("org.bluez.Agent1", |b| {
+                            b.method("Release", (), (), |_, _, _: ()| {
+                                Ok(())
+                            });
+
+                            b.method("RequestPinCode", ("device",), ("pin",), |_, _, (_device,): (dbus::Path<'_>,)| -> std::result::Result<(String,), dbus_crossroads::MethodErr> {
+                                std::result::Result::Err(dbus_crossroads::MethodErr::failed("Rejected by BitChat agent"))
+                            });
+
+                            b.method("DisplayPinCode", ("device","pincode"), (), |_, _, _: (dbus::Path<'_>, String)| {
+                                // Ignore display requests
+                                Ok(())
+                            });
+
+                            b.method("RequestPasskey", ("device",), ("passkey",), |_, _, (_device,): (dbus::Path<'_>,)| -> std::result::Result<(u32,), dbus_crossroads::MethodErr> {
+                                std::result::Result::Err(dbus_crossroads::MethodErr::failed("Rejected by BitChat agent"))
+                            });
+
+                            b.method("DisplayPasskey", ("device","passkey","entered"), (), |_, _, _: (dbus::Path<'_>, u32, u16)| {
+                                Ok(())
+                            });
+
+                            b.method("RequestConfirmation", ("device","passkey"), (), |_, _, (_device, _passkey): (dbus::Path<'_>, u32)| -> std::result::Result<(), dbus_crossroads::MethodErr> {
+                                std::result::Result::Err(dbus_crossroads::MethodErr::failed("Rejected by BitChat agent"))
+                            });
+
+                            b.method("AuthorizeService", ("device","uuid"), (), |_, _, (_device, _uuid): (dbus::Path<'_>, String)| -> std::result::Result<(), dbus_crossroads::MethodErr> {
+                                std::result::Result::Err(dbus_crossroads::MethodErr::failed("Rejected by BitChat agent"))
+                            });
+
+                            b.method("Cancel", (), (), |_, _, _: ()| {
+                                Ok(())
+                            });
+                        });
+
+                        // Export at a known object path
+                        let path = dbus::Path::new("/org/bluez/bitchat/agent").unwrap();
+                        cr.insert(path.clone(), &[iface_token], ());
+
+                        // Register with BlueZ AgentManager1
+                        let proxy = conn.with_proxy("org.bluez", "/org/bluez", timeout);
+                        let capability: &str = "NoInputNoOutput";
+                        let _register_result: std::result::Result<(), dbus::Error> = proxy.method_call("org.bluez.AgentManager1", "RegisterAgent", (path.clone(), capability));
+                        let _default_result: std::result::Result<(), dbus::Error> = proxy.method_call("org.bluez.AgentManager1", "RequestDefaultAgent", (path.clone(),));
+
+                        // Serve incoming DBus messages (blocking)
+                        if let Err(e) = cr.serve(&conn) {
+                            warn!("DBus agent serve failed: {}", e);
+                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to connect to system bus for pairing agent: {}", e);
+                    }
+                }
+            });
+        }
+
         Ok(())
     }
     

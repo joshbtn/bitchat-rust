@@ -224,6 +224,7 @@ dependencies = [
  "crossterm",
  "curve25519-dalek",
  "dbus",
+ "dbus-crossroads",
  "dirs",
  "ed25519-dalek",
  "env_logger",

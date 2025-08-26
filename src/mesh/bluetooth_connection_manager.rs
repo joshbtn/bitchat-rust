@@ -66,18 +66,15 @@ impl BluetoothConnectionManager {
             info!("Successfully set pairable timeout to 0");
         }
         
-        // 3. Set discoverable timeout to 0 (always discoverable) 
-        if let Err(e) = adapter.set_discoverable_timeout(0).await {
-            warn!("Failed to set discoverable timeout (may not be supported): {}", e);
-        } else {
-            info!("Successfully set discoverable timeout to 0");
-        }
-        
-        // 4. Make sure discoverable is enabled for advertising
-        if let Err(e) = adapter.set_discoverable(true).await {
+        // 3. Ensure discoverable is disabled to avoid system pairing prompts
+        // Some BlueZ frontends will offer pairing dialogs when an adapter is
+        // discoverable or discoverable timeout is set to 0. For our
+        // connectionless BLE mesh we don't need the adapter to be discoverable
+        // at the adapter level (we advertise actively), so try to disable it.
+        if let Err(e) = adapter.set_discoverable(false).await {
             warn!("Failed to set discoverable (may not be supported): {}", e);
         } else {
-            info!("Successfully enabled discoverable mode");
+            info!("Successfully disabled discoverable mode");
         }
         
         // 5. Try to disable legacy pairing and authentication
@@ -114,9 +111,12 @@ impl BluetoothConnectionManager {
     pub async fn start_advertising(&self) -> Result<()> {
         info!("Starting BLE advertising");
         
+        // Advertise but avoid marking the adapter as globally discoverable.
+        // Keep local name so peers can see the service, but don't force adapter-level
+        // discoverable state which may trigger pairing flows in some environments.
         let advertisement = Advertisement {
             service_uuids: vec![SERVICE_UUID].into_iter().collect(),
-            discoverable: Some(true),
+            discoverable: Some(false),
             local_name: Some("BitChat".to_string()),
             ..Default::default()
         };
@@ -144,7 +144,10 @@ impl BluetoothConnectionManager {
         let subscribed_centrals = self.subscribed_centrals.clone();
         
         let write_handle = CharacteristicWrite {
-            write: true,
+            // Prefer write without response to avoid triggering security/bonding
+            // requirements on some platforms. Keep regular write as false so we
+            // don't cause the stack to demand pairing for write access.
+            write: false,
             write_without_response: true,
             method: CharacteristicWriteMethod::Fun(Box::new(move |new_value, req| {
                 let data_handler = data_handler.clone();
@@ -287,7 +290,9 @@ impl BluetoothConnectionManager {
         let advertisement = Advertisement {
             service_uuids: vec![SERVICE_UUID].into_iter().collect(),
             service_data: service_data.into_iter().collect(),
-            discoverable: Some(true),
+            // Avoid setting adapter-wide discoverable; advertising the service
+            // is sufficient for BLE mesh discovery.
+            discoverable: Some(false),
             local_name: Some("BitChat".to_string()),
             ..Default::default()
         };

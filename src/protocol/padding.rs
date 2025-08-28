@@ -19,14 +19,19 @@ impl MessagePadding {
     }
     
     pub fn pad(data: &[u8], target_size: usize) -> Vec<u8> {
-        if data.len() >= target_size {
-            return data.to_vec();
-        }
-        
-        let padding_needed = target_size - data.len();
-        
-        // PKCS#7 only supports padding up to 255 bytes
-        // If we need more padding than that, don't pad - return original data
+        // If data is already at or above the target size, still add a single
+        // padding byte so that the unpad logic can reliably detect padding.
+        // This avoids cases where no padding was added and the unpad routine
+        // misinterprets the last data byte as a padding length, corrupting
+        // handshake payloads.
+        let mut padding_needed = if data.len() >= target_size {
+            1usize
+        } else {
+            target_size - data.len()
+        };
+
+        // PKCS#7 only supports padding up to 255 bytes. If the required
+        // padding is larger than 255, skip padding to avoid invalid PKCS#7.
         if padding_needed > 255 {
             return data.to_vec();
         }
@@ -35,15 +40,15 @@ impl MessagePadding {
         
         // Copy original data
         result.extend_from_slice(data);
-        
+
         // Add random padding bytes (all but the last byte)
         if padding_needed > 1 {
             let mut random_bytes = vec![0u8; padding_needed - 1];
             thread_rng().fill_bytes(&mut random_bytes);
             result.extend_from_slice(&random_bytes);
         }
-        
-        // Last byte tells how much padding was added
+
+        // Last byte tells how much padding was added (PKCS#7 style)
         result.push(padding_needed as u8);
         
         result

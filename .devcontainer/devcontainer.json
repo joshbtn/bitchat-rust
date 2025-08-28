@@ -2,5 +2,9 @@
     "build": {
         "dockerfile": "../Dockerfile.dev",
         "context": ".."
-    }
+    },
+    "mounts": [
+        "source=${localEnv:USERPROFILE}/.gitconfig,target=/home/vscode/.gitconfig,type=bind,consistency=cached",
+        "source=${localEnv:USERPROFILE}/.ssh,target=/home/vscode/.ssh,type=bind,consistency=cached"
+    ]
 }

@@ -215,8 +215,10 @@ impl BluetoothConnectionManager {
                     uuid: CHARACTERISTIC_UUID,
                     write: Some(write_handle),
                     notify: Some(notify_handle),
-                    // Note: BlueR may not expose all GATT security configuration options
-                    // We rely on the adapter-level pairing configuration instead
+                    // Set explicit security flags to avoid pairing requirements
+                    // These should prevent BlueZ from requiring authentication/encryption
+                    secure_read: Some(false),
+                    secure_write: Some(false),
                     ..Default::default()
                 },
             ],

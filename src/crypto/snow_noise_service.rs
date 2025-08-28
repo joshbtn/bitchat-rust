@@ -288,11 +288,18 @@ impl SnowNoiseService {
                 .ok_or_else(|| Error::Noise("No handshake state".to_string()))?;
             
             let mut payload_buffer = vec![0u8; 65535];
-            let payload_len = handshake.read_message(&packet.payload, &mut payload_buffer)
-                .map_err(|e| {
-                    error!("Responder failed to read third message from {}: {}", peer_id, e);
-                    Error::Encryption(format!("Failed to read third message: {}", e))
-                })?;
+            let payload_len = match handshake.read_message(&packet.payload, &mut payload_buffer) {
+                Ok(len) => len,
+                Err(e) => {
+                    // Provide extra diagnostics for debugging decrypt errors
+                    let payload_len = packet.payload.len();
+                    let snippet_len = std::cmp::min(16, packet.payload.len());
+                    let snippet = hex::encode(&packet.payload[..snippet_len]);
+                    error!("Responder failed to read third message from {}: {}. payload_len={}, snippet={}..., session_recv_nonce={}, session_send_nonce={}",
+                        peer_id, e, payload_len, snippet, session.recv_nonce, session.send_nonce);
+                    return Err(Error::Encryption(format!("Failed to read third message: {}", e)));
+                }
+            };
             
             if payload_len > 0 {
                 debug!("Third message contained {} bytes of payload", payload_len);
@@ -331,11 +338,17 @@ impl SnowNoiseService {
                 .ok_or_else(|| Error::Noise("No handshake state".to_string()))?;
             
             let mut payload_buffer = vec![0u8; 65535];
-            let payload_len = handshake.read_message(&packet.payload, &mut payload_buffer)
-                .map_err(|e| {
-                    error!("Initiator failed to read second message from {}: {}", peer_id, e);
-                    Error::Encryption(format!("Failed to read second message: {}", e))
-                })?;
+            let payload_len = match handshake.read_message(&packet.payload, &mut payload_buffer) {
+                Ok(len) => len,
+                Err(e) => {
+                    let payload_len = packet.payload.len();
+                    let snippet_len = std::cmp::min(16, packet.payload.len());
+                    let snippet = hex::encode(&packet.payload[..snippet_len]);
+                    error!("Initiator failed to read second message from {}: {}. payload_len={}, snippet={}..., session_recv_nonce={}, session_send_nonce={}",
+                        peer_id, e, payload_len, snippet, session.recv_nonce, session.send_nonce);
+                    return Err(Error::Encryption(format!("Failed to read second message: {}", e)));
+                }
+            };
             
             if payload_len > 0 {
                 debug!("Second message contained {} bytes of payload", payload_len);

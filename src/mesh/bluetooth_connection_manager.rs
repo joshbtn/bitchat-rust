@@ -16,7 +16,7 @@ use std::time::Duration as StdDuration;
 
 // DBus agent imports (used only when running on Linux with system bus)
 #[cfg(target_os = "linux")]
-use dbus_crossroads::{Crossroads, MethodErr};
+use dbus_crossroads::Crossroads;
 #[cfg(target_os = "linux")]
 use dbus::blocking::Connection as DbusConnection;
 
@@ -215,10 +215,10 @@ impl BluetoothConnectionManager {
                     uuid: CHARACTERISTIC_UUID,
                     write: Some(write_handle),
                     notify: Some(notify_handle),
-                    // Set explicit security flags to avoid pairing requirements
-                    // These should prevent BlueZ from requiring authentication/encryption
-                    secure_read: Some(false),
-                    secure_write: Some(false),
+                    // Let the application authorize access; this gives us control
+                    // over access requests at the application level instead of
+                    // relying on BlueZ to enforce pairing/bonding.
+                    authorize: true,
                     ..Default::default()
                 },
             ],

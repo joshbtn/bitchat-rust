@@ -19,6 +19,89 @@ struct NoiseSession {
     recv_nonce: u32,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use snow::Builder;
+
+    #[test]
+    fn test_noise_xx_handshake_roundtrip() {
+        // Generate static keypairs for both peers
+        let kp1 = Builder::new(NOISE_PATTERN.parse().unwrap())
+            .generate_keypair()
+            .expect("keypair1");
+        let kp2 = Builder::new(NOISE_PATTERN.parse().unwrap())
+            .generate_keypair()
+            .expect("keypair2");
+
+        // Build initiator and responder handshake states using their static keys
+        let mut initiator = Builder::new(NOISE_PATTERN.parse().unwrap())
+            .local_private_key(&kp1.private[..32])
+            .build_initiator()
+            .expect("build initiator");
+
+        let mut responder_builder = Builder::new(NOISE_PATTERN.parse().unwrap());
+        responder_builder = responder_builder.local_private_key(&kp2.private[..32]);
+        let mut responder = responder_builder
+            .build_responder()
+            .expect("build responder");
+
+        // 1) Initiator -> first message
+        let mut buf1 = vec![0u8; 65535];
+        let len1 = initiator.write_message(&[], &mut buf1).expect("initiator write 1");
+        buf1.truncate(len1);
+
+        // 2) Responder reads first message
+        let mut payload = vec![0u8; 65535];
+        let rlen = responder.read_message(&buf1, &mut payload).expect("responder read 1");
+        assert_eq!(rlen, 0);
+
+        // 3) Responder -> second message
+        let mut buf2 = vec![0u8; 65535];
+        let len2 = responder.write_message(&[], &mut buf2).expect("responder write 2");
+        buf2.truncate(len2);
+
+        // 4) Initiator reads second message
+        let rlen2 = initiator.read_message(&buf2, &mut payload).expect("initiator read 2");
+        assert_eq!(rlen2, 0);
+
+        // 5) Initiator -> third message
+        let mut buf3 = vec![0u8; 65535];
+        let len3 = initiator.write_message(&[], &mut buf3).expect("initiator write 3");
+        buf3.truncate(len3);
+
+        // 6) Responder reads third message
+        let rlen3 = responder.read_message(&buf3, &mut payload).expect("responder read 3");
+        assert_eq!(rlen3, 0);
+
+        // Convert both to transport
+        let mut t1 = initiator.into_transport_mode().expect("initiator to transport");
+        let mut t2 = responder.into_transport_mode().expect("responder to transport");
+
+        // Test encrypted roundtrip initiator -> responder
+        let plaintext = b"hello from initiator".to_vec();
+        let mut out = vec![0u8; plaintext.len() + 64];
+        let out_len = t1.write_message(&plaintext, &mut out).expect("t1 write");
+        out.truncate(out_len);
+
+        let mut dec = vec![0u8; out.len()];
+        let dec_len = t2.read_message(&out, &mut dec).expect("t2 read");
+        dec.truncate(dec_len);
+        assert_eq!(dec, plaintext);
+
+        // And responder -> initiator
+        let plaintext2 = b"reply from responder".to_vec();
+        let mut out2 = vec![0u8; plaintext2.len() + 64];
+        let out2_len = t2.write_message(&plaintext2, &mut out2).expect("t2 write");
+        out2.truncate(out2_len);
+
+        let mut dec2 = vec![0u8; out2.len()];
+        let dec2_len = t1.read_message(&out2, &mut dec2).expect("t1 read");
+        dec2.truncate(dec2_len);
+        assert_eq!(dec2, plaintext2);
+    }
+}
+
 pub struct SnowNoiseService {
     // Ed25519 identity keys
     signing_key: SigningKey,

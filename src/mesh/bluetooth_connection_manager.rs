@@ -434,6 +434,15 @@ impl BluetoothConnectionManager {
                                         if let Err(e) = connection_manager.process_discovered_device(addr).await {
                                             warn!("Failed to process discovered device {}: {}", addr, e);
                                         }
+                                        
+                                        // Best-effort: try to connect as central to allow GATT
+                                        // exchanges if the remote supports it. This is optional
+                                        // and will not panic on failure; many Android clients
+                                        // may not support central role and will simply fail.
+                                        match device.connect().await {
+                                            Ok(_) => info!("Successfully connected to device {} as central", addr),
+                                            Err(e) => debug!("Could not connect to {} (expected on some devices): {}", addr, e),
+                                        }
                                     } else {
                                         debug!("Device {} does not advertise BitChat service", addr);
                                     }
